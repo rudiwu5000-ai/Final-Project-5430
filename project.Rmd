@@ -1,0 +1,257 @@
+---
+title: "project_simu"
+output: html_document
+date: "2025-12-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+```
+
+
+```{r}
+wsb <- read.csv("Stock_wallstreetbets_clean_timestamp.csv",
+                stringsAsFactors = FALSE)
+stock <- read.csv("november_stock_data.csv",
+                  stringsAsFactors = FALSE)
+stock$Date <- as.Date(stock$Date)
+
+# Only trade positive signals
+
+wsb_pos <- wsb %>% filter(ml_sentiment == "positive")
+wsb_pos$ts <- ymd_hms(wsb_pos$clean_timestamp)
+
+# Entry Rule
+
+market_open  <- hm("09:30")
+market_close <- hm("16:00")
+
+next_monday <- function(d) {
+  wd <- wday(d, week_start = 1)  # Monday=1
+  if (wd <= 5) {
+    d + days((8 - wd) %% 7)
+  } else {
+    d + days(8 - wd)  # Sat → +2, Sun → +1
+  }
+}
+
+decide_trade_time <- function(ts) {
+  d  <- as.Date(ts)
+  t  <- hms(format(ts, "%H:%M:%S"))
+  wd <- wday(ts, week_start = 1)  # Mon=1 ... Sun=7
+  
+  # Weekend → Monday open
+  if (wd >= 6) {
+    return(list(date = next_monday(d), type = "Open"))
+  }
+  
+  # Mon–Thu
+  if (wd <= 4) {
+    if (abs(as.numeric(t - market_open)) <= abs(as.numeric(t - market_close))) {
+      return(list(date = d, type = "Open"))
+    } else {
+      return(list(date = d, type = "Close"))
+    }
+  }
+  
+  # Friday
+  if (wd == 5) {
+    if (t <= market_close) {
+      if (abs(as.numeric(t - market_open)) <= abs(as.numeric(t - market_close))) {
+        return(list(date = d, type = "Open"))
+      } else {
+        return(list(date = d, type = "Close"))
+      }
+    }
+    # after close → Monday open
+    return(list(date = next_monday(d), type = "Open"))
+  }
+}
+
+trade_info <- lapply(wsb_pos$ts, decide_trade_time)
+wsb_pos$trade_date <- as.Date(sapply(trade_info, `[[`, "date"))
+wsb_pos$price_type <- sapply(trade_info, `[[`, "type")
+
+wsb_pos$Ticker <- str_trim(wsb_pos$Refered.stock)
+
+# Merge for entry price
+
+wsb_pos <- wsb_pos %>%
+  left_join(stock, by = c("Ticker", "trade_date" = "Date"))
+
+wsb_pos <- wsb_pos %>%
+  mutate(entry_price = ifelse(price_type == "Open", Open, Close))
+
+wsb_pos_trades <- wsb_pos %>%
+  filter(!is.na(entry_price))
+
+stock_by_ticker <- split(stock, stock$Ticker)
+
+# One trade with daily stop
+simulate_trade <- function(ticker, entry_date, entry_price, env) {
+  s <- env[[ticker]]
+  if (is.null(s)) return(NULL)
+  
+  s <- s %>% filter(Date >= entry_date) %>% arrange(Date)
+  if (nrow(s) == 0) return(NULL)
+  
+  daily_ret <- s$Close / entry_price - 1
+  
+  sl_idx <- which(daily_ret <= -0.07)   # -7%
+  tp_idx <- which(daily_ret >=  0.25)   # +25%
+  
+  if (length(sl_idx) == 0 && length(tp_idx) == 0) {
+    idx <- nrow(s)
+    reason <- "EOM"
+  } else {
+    first_sl <- ifelse(length(sl_idx) > 0, min(sl_idx), Inf)
+    first_tp <- ifelse(length(tp_idx) > 0, min(tp_idx), Inf)
+    
+    if (first_sl < first_tp) {
+      idx <- first_sl; reason <- "SL"
+    } else {
+      idx <- first_tp; reason <- "TP"
+    }
+  }
+  
+  data.frame(
+    exit_date = s$Date[idx],
+    exit_price = s$Close[idx],
+    exit_reason = reason,
+    stringsAsFactors = FALSE
+  )
+}
+
+
+# Simulation
+
+results_list <- lapply(seq_len(nrow(wsb_pos_trades)), function(i) {
+  r <- wsb_pos_trades[i, ]
+  out <- simulate_trade(r$Ticker, r$trade_date, r$entry_price, stock_by_ticker)
+  if (is.null(out)) return(NULL)
+  cbind(r, out)
+})
+
+sim <- bind_rows(results_list)
+
+
+# Portfolio
+
+sim <- sim %>%
+  mutate(
+    dollars_invested = 100,
+    shares = dollars_invested / entry_price,
+    final_value = shares * exit_price,
+    trade_return_pct = final_value / dollars_invested - 1
+  )
+
+
+summary_portfolio <- list(
+  total_signals = nrow(wsb_pos),
+  total_executed = nrow(sim),
+  total_invested = sum(sim$dollars_invested),
+  final_value = sum(sim$final_value),
+  overall_return_pct = sum(sim$final_value) / sum(sim$dollars_invested) - 1,
+  exit_reason_counts = table(sim$exit_reason)
+)
+
+print(summary_portfolio)
+
+
+```
+
+
+
+```{r}
+df <- read_csv("wsb_november_positive_rolling_portfolio.csv", show_col_types = FALSE)
+
+# ---- Derived Columns ----
+df <- df %>%
+  mutate(
+    holding_days = as.numeric(exit_date - trade_date),
+    pnl = final_value - dollars_invested,
+    equity_curve = 100 * cumprod(1 + trade_return_pct)
+  ) %>%
+  arrange(trade_date)
+
+# ---- Summary Stats ----
+win_rate <- mean(df$trade_return_pct > 0)
+avg_gain <- mean(df$trade_return_pct[df$trade_return_pct > 0])
+avg_loss <- mean(df$trade_return_pct[df$trade_return_pct <= 0])
+
+cat("Win rate:", scales::percent(win_rate), "\n")
+cat("Average Gain:", scales::percent(avg_gain), "\n")
+cat("Average Loss:", scales::percent(avg_loss), "\n")
+
+# ---- PnL by Ticker ----
+ticker_pnl <- df %>%
+  group_by(Ticker) %>%
+  summarize(total_pnl = sum(pnl)) %>%
+  arrange(desc(total_pnl))
+
+print(ticker_pnl)
+
+# Equity Curve
+ggplot(df, aes(x = trade_date, y = equity_curve)) +
+  geom_line(color = "steelblue", linewidth = 1.1) +
+  labs(
+    title = "Naive Equity Curve (Full Reinvestment)",
+    x = "Trade Date",
+    y = "Equity (Start = 100)"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Distribution of trade return
+ggplot(df, aes(x = trade_return_pct)) +
+  geom_histogram(bins = 15, fill = "skyblue", color = "black") +
+  labs(
+    title = "Distribution of Trade Returns",
+    x = "Trade Return (%)",
+    y = "Frequency"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Retruns by ticker(>3)
+valid_tickers <- df %>% count(Ticker) %>% filter(n >= 3) %>% pull(Ticker)
+
+df %>%
+  filter(Ticker %in% valid_tickers) %>%
+  ggplot(aes(x = Ticker, y = trade_return_pct)) +
+  geom_boxplot(fill = "orange", alpha = 0.7) +
+  labs(
+    title = "Trade Returns by Ticker (≥3 trades)",
+    x = "Ticker",
+    y = "Trade Return (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Holding distribution
+ggplot(df, aes(x = holding_days)) +
+  geom_histogram(binwidth = 1, fill = "seagreen", color = "black") +
+  labs(
+    title = "Distribution of Holding Periods",
+    x = "Holding Days",
+    y = "Frequency"
+  ) +
+  theme_minimal(base_size = 14)
+
+ticker_pnl %>%
+  slice_max(order_by = total_pnl, n = 10) %>%
+  ggplot(aes(x = reorder(Ticker, total_pnl), y = total_pnl)) +
+  geom_col( alpha = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Top 10 Tickers by Total PnL",
+    x = "Ticker",
+    y = "Total PnL (USD)"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+
