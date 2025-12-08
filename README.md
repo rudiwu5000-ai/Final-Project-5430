@@ -88,55 +88,5 @@ This is the final step in the full workflow.
 5. Apply sentiment to November posts → sentiment_apply.py
 6. Run trading simulation & analysis → project.Rmd
 
-
-## 📌 **How to Explore the Repository**
-
-If you want to understand the pipeline:
-
-### Start Here
-
-➡️ **`Stock wallstreetbets.csv`**
-Raw WSB posts from November.
-
-### Then Look at
-
-➡️ **`Stock_wallstreetbets_clean_timestamp.csv`**
-Cleaned version used for sentiment modeling.
-
-### Check the Sentiment Framework
-
-➡️ **`wsb3000_with_sentiment.csv`**
-Your labeled training set.
-
-### See ML Sentiment Applied
-
-➡️ **`Stock_wallstreetbets_with_ml_sentiment.csv`**
-
-### See Price Data
-
-➡️ **`november_stock_data.csv`**
-
-### Final Simulation
-
-➡️ **`project.Rmd`**
-This is where the trading logic and analysis are executed.
-
----
-
-## 🛠 Requirements
-
-### Python (for scraping + sentiment)
-
-Libraries used may include:
-
-* `praw`, `requests`, `pandas`, `beautifulsoup4`, etc.
-
-### R (for simulation)
-
-Required packages:
-
-* `tidyverse`
-* `lubridate`
-* `ggplot2`
-* `scales`
+## All requirements of packages can be found in the code files
 
